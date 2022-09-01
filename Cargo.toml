@@ -1,0 +1,14 @@
+[package]
+name = "cueue"
+version = "0.1.0"
+edition = "2021"
+authors = ["Benedek Thaler"]
+license = "MIT"
+repository = "https://github.com/erenon/cueue-rs"
+description = "High performance SPSC byte circular buffer with batch operations"
+keywords = ["spsc", "queue", "ringbuffer"]
+categories = ["data-structures"]
+readme = "README.md"
+
+[dependencies]
+libc = "0.2.132"
