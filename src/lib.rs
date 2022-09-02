@@ -4,7 +4,6 @@
 //! suitable for inter-thread communication.
 //!
 //!```
-//! fn main() {
 //!     let (mut w, mut r) = cueue::cueue(1 << 20).unwrap();
 //! 
 //!     w.begin_write();
@@ -17,7 +16,6 @@
 //!     let read_result = r.begin_read();
 //!     assert_eq!(read_result, b"foobarbaz");
 //!     r.end_read();
-//! }
 //! ```
 
 use std::ffi::CString;
