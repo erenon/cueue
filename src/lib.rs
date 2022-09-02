@@ -1,18 +1,17 @@
-
 //! A high performance, single-producer, single-consumer, bounded circular buffer
 //! of contiguous bytes, that supports lock-free atomic batch operations,
 //! suitable for inter-thread communication.
 //!
 //!```
 //!     let (mut w, mut r) = cueue::cueue(1 << 20).unwrap();
-//! 
+//!
 //!     w.begin_write();
 //!     assert!(w.write_capacity() >= 9);
 //!     w.write(b"foo");
 //!     w.write(b"bar");
 //!     w.write(b"baz");
 //!     w.end_write();
-//! 
+//!
 //!     let read_result = r.begin_read();
 //!     assert_eq!(read_result, b"foobarbaz");
 //!     r.end_read();
