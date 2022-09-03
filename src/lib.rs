@@ -199,7 +199,7 @@ fn next_power_two(mut n: usize) -> usize {
 
 /// Force an AtomicU64 to a separate cache-line to avoid false-sharing.
 /// This wrapper is needed as I was unable to specify alignment for individual fields.
-#[repr(align(64))]
+#[repr(align(128))]
 #[derive(Default)]
 struct CacheLineAlignedAU64(std::sync::atomic::AtomicU64);
 
