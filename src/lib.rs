@@ -405,6 +405,13 @@ pub fn cueue<'a>(requested_capacity: usize) -> Result<(Writer<'a>, Reader<'a>), 
     let capacity = next_power_two(usize::max(requested_capacity, pagesize));
     let cbsize = pagesize;
 
+    if std::mem::size_of::<ControlBlock>() > pagesize {
+        return Err(CError {
+            hint: "ControlBlock does not fit in a single page",
+            err: std::io::ErrorKind::Other.into(),
+        });
+    }
+
     let (mut map, cb) = unsafe {
         let f = memoryfile()?;
         if ftruncate(f.as_raw_fd(), (cbsize + capacity) as i64) != 0 {
