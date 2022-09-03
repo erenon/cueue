@@ -2,13 +2,17 @@ use crate::*;
 
 #[test]
 fn test_next_power_two() {
-    assert_eq!(1, next_power_two(0));
-    assert_eq!(1, next_power_two(1));
-    assert_eq!(2, next_power_two(2));
-    assert_eq!(4, next_power_two(3));
-    assert_eq!(4, next_power_two(4));
-    assert_eq!(4096, next_power_two(4095));
-    assert_eq!(4096, next_power_two(4096));
+    assert_eq!(1, next_power_two(0).unwrap());
+    assert_eq!(1, next_power_two(1).unwrap());
+    assert_eq!(2, next_power_two(2).unwrap());
+    assert_eq!(4, next_power_two(3).unwrap());
+    assert_eq!(4, next_power_two(4).unwrap());
+    assert_eq!(8, next_power_two(5).unwrap());
+    assert_eq!(4096, next_power_two(4095).unwrap());
+    assert_eq!(4096, next_power_two(4096).unwrap());
+
+    assert_eq!(1 << 63, next_power_two(1 << 63).unwrap());
+    assert!(next_power_two((1 << 63) + 1).is_err());
 }
 
 #[test]

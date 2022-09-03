@@ -182,19 +182,28 @@ unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> Result<MemoryMap, 
     Ok(map)
 }
 
-/// Returns smallest power of 2 not smaller than `n`
-fn next_power_two(mut n: usize) -> usize {
+/// Returns smallest power of 2 not smaller than `n`,
+/// or an error if the expected result cannot be represented by the return type.
+fn next_power_two(n: usize) -> Result<usize, CError> {
     if n == 0 {
-        return 1;
+        return Ok(1);
     }
 
-    n -= 1;
+    let mut m = n - 1;
     let mut result = 1;
-    while n != 0 {
-        n >>= 1;
+    while m != 0 {
+        m >>= 1;
         result <<= 1;
     }
-    result
+
+    if result >= n {
+        Ok(result)
+    } else {
+        Err(CError {
+            hint: "next_power_two",
+            err: std::io::ErrorKind::Other.into(),
+        })
+    }
 }
 
 /// Force an AtomicU64 to a separate cache-line to avoid false-sharing.
@@ -398,11 +407,13 @@ unsafe impl<'a> Send for Reader<'a> {}
 /// of the constructed queue: it might be rounded up to match system requirements
 /// (power of two, multiple of page size).
 ///
+/// `requested_capacity` must not be bigger than 2^63.
+///
 /// On success, returns a `(Writer, Reader)` pair, that share the ownership
 /// of the underlying circular byte array.
 pub fn cueue<'a>(requested_capacity: usize) -> Result<(Writer<'a>, Reader<'a>), CError> {
     let pagesize = unsafe { sysconf(_SC_PAGESIZE) as usize };
-    let capacity = next_power_two(usize::max(requested_capacity, pagesize));
+    let capacity = next_power_two(usize::max(requested_capacity, pagesize))?;
     let cbsize = pagesize;
 
     if std::mem::size_of::<ControlBlock>() > pagesize {
