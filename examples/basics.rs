@@ -15,13 +15,13 @@ fn main() {
 
     // Check if there are 9 bytes free for writing in the cueue.
     if w.begin_write_if_needed(3 + 3 + 3) {
-        // If yes, write whatever we want
+        // If yes, write whatever we want - we are safe to unwrap()
         println!("Write foo");
-        w.write(b"foo");
+        w.write(b"foo").unwrap();
         println!("Write bar");
-        w.write(b"bar");
+        w.write(b"bar").unwrap();
         println!("Write baz");
-        w.write(b"baz");
+        w.write(b"baz").unwrap();
         // When done, make the written are available for reading.
         // Without this, the reader will not see the written but not committed changes.
         w.end_write();
