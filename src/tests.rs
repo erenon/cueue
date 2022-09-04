@@ -35,7 +35,7 @@ fn test_writer() {
     w.end_write();
 
     assert_eq!(w.write_capacity(), cap);
-    w.write(b"foo");
+    w.write(b"foo").unwrap();
     assert_eq!(w.write_capacity(), cap - 3);
 }
 
@@ -59,7 +59,7 @@ fn test_reader() {
     r.end_read();
 
     w.begin_write();
-    w.write(b"foo");
+    w.write(b"foo").unwrap();
     w.end_write();
 
     let foo = r.begin_read();
@@ -73,8 +73,9 @@ fn test_full() {
 
     let cap = w.begin_write();
     for _ in 0..cap {
-        w.write(b"x");
+        w.write(b"x").unwrap();
     }
+    assert!(w.write(b"x").is_err());
     w.end_write();
     assert_eq!(w.write_capacity(), 0);
 
@@ -91,7 +92,7 @@ fn test_cueue_threaded_w_r() {
         let mut msg: u8 = 0;
         for _ in 0..maxi {
             while w.begin_write_if_needed(1) == false {}
-            w.write(&[msg; 1]);
+            w.write(&[msg; 1]).unwrap();
             w.end_write();
 
             msg = msg.wrapping_add(1);

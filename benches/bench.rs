@@ -23,7 +23,9 @@ fn bench_write(b: &mut Bencher) {
 
     b.iter(move || {
         while w.begin_write_if_needed(16) == false {}
-        w.write(b"123456789abcdefh");
+        unsafe {
+            w.unchecked_write(b"123456789abcdefh");
+        }
         w.end_write();
     });
 

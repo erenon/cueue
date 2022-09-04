@@ -7,9 +7,9 @@
 //!
 //!     w.begin_write();
 //!     assert!(w.write_capacity() >= 9);
-//!     w.write(b"foo");
-//!     w.write(b"bar");
-//!     w.write(b"baz");
+//!     w.write(b"foo").unwrap();
+//!     w.write(b"bar").unwrap();
+//!     w.write(b"baz").unwrap();
 //!     w.end_write();
 //!
 //!     let read_result = r.begin_read();
@@ -307,17 +307,33 @@ impl<'a> Writer<'a> {
         }
     }
 
+    /// Attempt to copy `src` to the internal write buffer.
+    ///
+    /// Successful if write_capacity() >= src.len(), fails otherwise.
+    pub fn write(&mut self, src: &[u8]) -> Result<(), CError> {
+        if self.write_capacity() >= src.len() {
+            unsafe {
+                self.unchecked_write(src);
+            }
+            Ok(())
+        } else {
+            Err(CError {
+                hint: "Insufficient write_capacity",
+                err: std::io::ErrorKind::Other.into(),
+            })
+        }
+    }
+
     /// Copy `src` to the internal write buffer.
     ///
+    /// # Safety
     /// Requires `write_capacity() >= src.len()`.
     #[inline]
-    pub fn write(&mut self, src: &[u8]) {
+    pub unsafe fn unchecked_write(&mut self, src: &[u8]) {
         debug_assert!(self.write_capacity() >= src.len());
 
-        unsafe {
-            std::ptr::copy_nonoverlapping(src.as_ptr(), self.write_pos, src.len());
-            self.write_pos = self.write_pos.add(src.len());
-        }
+        std::ptr::copy_nonoverlapping(src.as_ptr(), self.write_pos, src.len());
+        self.write_pos = self.write_pos.add(src.len());
     }
 
     /// Make the written parts of the internal write buffer available for reading.
