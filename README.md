@@ -1,7 +1,7 @@
 # Cueue
 
 A high performance, single-producer, single-consumer, bounded circular buffer
-of contiguous bytes, that supports lock-free atomic batch operations,
+of contiguous elements, that supports lock-free atomic batch operations,
 suitable for inter-thread communication.
 
 ## Example
@@ -10,27 +10,31 @@ suitable for inter-thread communication.
 fn main() {
     let (mut w, mut r) = cueue::cueue(1 << 20).unwrap();
 
-    w.begin_write();
-    assert!(w.write_capacity() >= 9);
-    w.write(b"foo");
-    w.write(b"bar");
-    w.write(b"baz");
-    w.end_write();
+    let buf = w.write_chunk();
+    assert!(buf.len() >= 9);
+    buf[..9].copy_from_slice(b"foobarbaz");
+    w.commit(9);
 
-    let read_result = r.begin_read();
+    let read_result = r.read_chunk();
     assert_eq!(read_result, b"foobarbaz");
-    r.end_read();
+    r.commit();
 }
 ```
 
 A bounded `cueue` of requested capacity is referenced by a single Writer and a single Reader.
-The Writer can request space to write (`begin_write`, `begin_write_if_needed`),
+The Writer can request space to write (`write_chunk`),
 limited by the queue capacity minus the already committed but unread space.
-Requested space can written to (`write`, possibly multiple times), then committed (`end_write`).
+Requested space can written to, then committed (`end_write`).
+A special feature of this container is that stored elements are always initialized,
+(in the beginning, defaulted, therefore `T` must implement `Default`), and only
+dropped when the queue is dropped. Therefore, the writer can reuse previously
+written, but then consumed elements (useful if the elements own e.g: heap allocated memory),
+and in those cases, contention on the producers heap lock is avoided (that is otherwise present,
+if the consumer drops heap allocated elements continuously that the producer allocated).
 
-The Reader can check out the written bytes (`begin_read`), process it at will,
-then mark it as consumed (`end_read`). The returned slice of bytes might be a result
-of multiple writer commits (i.e: the reading is batched), but it never includes uncommitted bytes
+The Reader can check out the written elements (`read_chunk`), process it at will,
+then mark it as consumed (`commit`). The returned slice of elements might be a result
+of multiple writer commits (i.e: the reading is batched), but it never include uncommitted elements
 (i.e: write commits are atomic). This prevents the reader observing partial messages.
 
 ## Use-case
@@ -51,15 +55,15 @@ Alternative options:
    Does not allow efficient reading (separate messages are not contiguous).
    Requires to estimate the max number of messages in flight, instead of the max sum of size of messages.
 
-This data structure uses a single byte array of the user specified capacity.
+This data structure uses a single array of the user specified capacity.
 At any given time, this array is sliced into three logical parts: allocated for writing,
 ready for reading, unwritten. (Any maximum two of the three can be zero sized)
 
-`begin_write` joins the unwritten part to the part already allocated for writing:
+`write_chunk` joins the unwritten part to the part already allocated for writing:
 the result is limited by the capacity minus the space ready for reading.
-`end_write` makes the written space ready for reading, zeroing the slice allocated for writing.
-`begin_read` determines the boundary of the space ready for reading,
-`end_read` marks this space unwritten. Thanks for the truly circular nature of `cueue`,
+`Writer::commit` makes the written space ready for reading, zeroing the slice allocated for writing.
+`read_chunk` determines the boundary of the space ready for reading,
+`Reader::commit` marks this space unwritten. Thanks for the truly circular nature of `cueue`,
 the writer and reader can freely chase each other around.
 
 ## How Does it Work
@@ -81,7 +85,7 @@ and data recovery from coredumps)
 
  - Supported platforms: Linux (3.17) and macOS
  - rust 1.63
- - Uses `unsafe` operations. Incorrect usage yields to crashing.
+ - Uses `unsafe` operations
 
 ## Build and Test
 
@@ -98,6 +102,8 @@ $ cargo doc --open
 ## Acknowledgments
 
 This is a rust port of the [binlog][] C++ [cueue][cpp-cueue].
+The interface names are changed to match [rtrb][], to make it more familiar for Rust developers.
 
 [binlog]: https://github.com/erenon/binlog
 [cpp-cueue]: https://github.com/erenon/binlog/blob/hiperf-macos/include/binlog/detail/Cueue.hpp
+[rtrb]: https://github.com/mgeier/rtrb

@@ -16,17 +16,22 @@ fn bench_write(b: &mut Bencher) {
 
     let rt = std::thread::spawn(move || {
         while rrun.load(Ordering::Acquire) {
-            let _rr = r.begin_read();
-            r.end_read();
+            let _rr = r.read_chunk();
+            r.commit();
         }
     });
 
     b.iter(move || {
-        while w.begin_write_if_needed(16) == false {}
+        let buf = loop {
+            let buf = w.write_chunk();
+            if buf.len() >= 16 {
+                break buf;
+            }
+        };
         unsafe {
-            w.unchecked_write(b"123456789abcdefh");
+            std::ptr::copy_nonoverlapping(b"123456789abcdefh", buf.as_mut_ptr(), 16);
         }
-        w.end_write();
+        w.commit(16);
     });
 
     run.store(false, Ordering::Release);
