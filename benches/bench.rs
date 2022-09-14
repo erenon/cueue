@@ -5,17 +5,12 @@ use cueue::cueue;
 extern crate test;
 use self::test::Bencher;
 
-use std::sync::atomic::Ordering;
-
 #[bench]
 fn bench_write(b: &mut Bencher) {
     let (mut w, mut r) = cueue(16).unwrap();
 
-    let run = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let rrun = run.clone();
-
     let rt = std::thread::spawn(move || {
-        while rrun.load(Ordering::Acquire) {
+        while !r.is_abandoned() {
             let _rr = r.read_chunk();
             r.commit();
         }
@@ -34,6 +29,5 @@ fn bench_write(b: &mut Bencher) {
         w.commit(16);
     });
 
-    run.store(false, Ordering::Release);
     rt.join().unwrap();
 }
