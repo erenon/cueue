@@ -103,7 +103,7 @@ impl MemoryMap {
         self.map == MAP_FAILED
     }
 
-    fn ptr(&mut self) -> *mut u8 {
+    fn ptr(&self) -> *mut u8 {
         self.map as *mut u8
     }
 }
@@ -119,7 +119,7 @@ impl Drop for MemoryMap {
 }
 
 struct MemoryMapInitialized<T> {
-    _map: MemoryMap,
+    map: MemoryMap,
     buf: *mut T,
     cap: usize,
 }
@@ -134,11 +134,12 @@ where
                 buf.add(i).write(T::default());
             }
         }
-        Self {
-            _map: map,
-            buf,
-            cap,
-        }
+        Self { map, buf, cap }
+    }
+
+    #[inline]
+    fn controlblock(&self) -> *mut ControlBlock {
+        self.map.ptr().cast::<ControlBlock>()
     }
 }
 
@@ -169,7 +170,7 @@ unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> Result<MemoryMap, 
     // Create a map, offset + twice the size, to get a suitable virtual address which will work with MAP_FIXED
     let rw = PROT_READ | PROT_WRITE;
     let mapsize = offset + size * 2;
-    let mut map = MemoryMap::new(
+    let map = MemoryMap::new(
         mmap(
             std::ptr::null_mut(),
             mapsize,
@@ -266,9 +267,9 @@ struct ControlBlock {
 /// Writer of a Cueue.
 ///
 /// See examples/ for usage.
-pub struct Writer<'a, T> {
+pub struct Writer<T> {
     mem: std::sync::Arc<MemoryMapInitialized<T>>,
-    cb: &'a ControlBlock,
+    cb: *mut ControlBlock,
     mask: u64,
 
     buffer: *mut T,
@@ -276,13 +277,12 @@ pub struct Writer<'a, T> {
     write_capacity: usize,
 }
 
-impl<'a, T> Writer<'a, T> {
-    fn new(
-        mem: std::sync::Arc<MemoryMapInitialized<T>>,
-        cb: &'a ControlBlock,
-        buffer: *mut T,
-        capacity: usize,
-    ) -> Self {
+impl<T> Writer<T>
+where
+    T: Default,
+{
+    fn new(mem: std::sync::Arc<MemoryMapInitialized<T>>, buffer: *mut T, capacity: usize) -> Self {
+        let cb = mem.controlblock();
         Self {
             mem,
             cb,
@@ -308,8 +308,8 @@ impl<'a, T> Writer<'a, T> {
     /// After write, `commit` must be called, to make the written elements
     /// available for reading.
     pub fn write_chunk(&mut self) -> &mut [T] {
-        let w = self.cb.write_position.0.load(Ordering::Relaxed);
-        let r = self.cb.read_position.0.load(Ordering::Acquire);
+        let w = self.write_pos().load(Ordering::Relaxed);
+        let r = self.read_pos().load(Ordering::Acquire);
 
         debug_assert!(r <= w);
         debug_assert!(r + self.capacity() as u64 >= w);
@@ -338,13 +338,10 @@ impl<'a, T> Writer<'a, T> {
     }
 
     unsafe fn unchecked_commit(&mut self, n: usize) {
-        let w = self.cb.write_position.0.load(Ordering::Relaxed);
+        let w = self.write_pos().load(Ordering::Relaxed);
         self.write_begin = self.write_begin.add(n);
         self.write_capacity -= n;
-        self.cb
-            .write_position
-            .0
-            .store(w + n as u64, Ordering::Release);
+        self.write_pos().store(w + n as u64, Ordering::Release);
     }
 
     /// Returns true, if the Reader counterpart was dropped.
@@ -363,16 +360,26 @@ impl<'a, T> Writer<'a, T> {
             Err(t)
         }
     }
+
+    #[inline]
+    fn write_pos(&mut self) -> &mut std::sync::atomic::AtomicU64 {
+        unsafe { &mut (*self.cb).write_position.0 }
+    }
+
+    #[inline]
+    fn read_pos(&mut self) -> &mut std::sync::atomic::AtomicU64 {
+        unsafe { &mut (*self.cb).read_position.0 }
+    }
 }
 
-unsafe impl<'a, T> Send for Writer<'a, T> {}
+unsafe impl<T> Send for Writer<T> {}
 
 /// Reader of a Cueue.
 ///
 /// See examples/ for usage.
-pub struct Reader<'a, T> {
+pub struct Reader<T> {
     mem: std::sync::Arc<MemoryMapInitialized<T>>,
-    cb: &'a ControlBlock,
+    cb: *mut ControlBlock,
     mask: u64,
 
     buffer: *const T,
@@ -380,13 +387,16 @@ pub struct Reader<'a, T> {
     read_size: u64,
 }
 
-impl<'a, T> Reader<'a, T> {
+impl<T> Reader<T>
+where
+    T: Default,
+{
     fn new(
         mem: std::sync::Arc<MemoryMapInitialized<T>>,
-        cb: &'a ControlBlock,
         buffer: *const T,
         capacity: usize,
     ) -> Self {
+        let cb = mem.controlblock();
         Self {
             mem,
             cb,
@@ -404,9 +414,9 @@ impl<'a, T> Reader<'a, T> {
     }
 
     /// Return a slice of elements written and committed by the Writer.
-    pub fn read_chunk(&mut self) -> &'a [T] {
-        let w = self.cb.write_position.0.load(Ordering::Acquire);
-        let r = self.cb.read_position.0.load(Ordering::Relaxed);
+    pub fn read_chunk(&mut self) -> &[T] {
+        let w = self.write_pos().load(Ordering::Acquire);
+        let r = self.read_pos().load(Ordering::Relaxed);
 
         debug_assert!(r <= w);
         debug_assert!(r + self.capacity() as u64 >= w);
@@ -424,20 +434,28 @@ impl<'a, T> Reader<'a, T> {
     /// Mark the slice previously acquired by `read_chunk` as consumed,
     /// making it available for writing.
     pub fn commit(&mut self) {
-        let r = self.cb.read_position.0.load(Ordering::Relaxed);
-        self.cb
-            .read_position
-            .0
-            .store(r + self.read_size, Ordering::Release);
+        let r = self.read_pos().load(Ordering::Relaxed);
+        let rs = self.read_size;
+        self.read_pos().store(r + rs, Ordering::Release);
     }
 
     /// Returns true, if the Writer counterpart was dropped.
     pub fn is_abandoned(&mut self) -> bool {
         std::sync::Arc::get_mut(&mut self.mem).is_some()
     }
+
+    #[inline]
+    fn write_pos(&mut self) -> &mut std::sync::atomic::AtomicU64 {
+        unsafe { &mut (*self.cb).write_position.0 }
+    }
+
+    #[inline]
+    fn read_pos(&mut self) -> &mut std::sync::atomic::AtomicU64 {
+        unsafe { &mut (*self.cb).read_position.0 }
+    }
 }
 
-unsafe impl<'a, T> Send for Reader<'a, T> {}
+unsafe impl<T> Send for Reader<T> {}
 
 /// Create a single-producer, single-consumer `Cueue`.
 ///
@@ -449,7 +467,7 @@ unsafe impl<'a, T> Send for Reader<'a, T> {}
 ///
 /// On success, returns a `(Writer, Reader)` pair, that share the ownership
 /// of the underlying circular array.
-pub fn cueue<'a, T>(requested_capacity: usize) -> Result<(Writer<'a, T>, Reader<'a, T>), CError>
+pub fn cueue<T>(requested_capacity: usize) -> Result<(Writer<T>, Reader<T>), CError>
 where
     T: Default,
 {
@@ -464,13 +482,13 @@ where
         });
     }
 
-    let (initmap, buffer, cb) = unsafe {
+    let (initmap, buffer) = unsafe {
         let f = memoryfile()?;
         let bufsize = capacity * std::mem::size_of::<T>();
         if ftruncate(f.as_raw_fd(), (cbsize + bufsize) as i64) != 0 {
             return Err(CError::new("ftruncate"));
         }
-        let mut map = doublemap(f.as_raw_fd(), cbsize, bufsize)?;
+        let map = doublemap(f.as_raw_fd(), cbsize, bufsize)?;
 
         // initialize control block
         let cbp = map.ptr() as *mut ControlBlock;
@@ -481,13 +499,13 @@ where
         let buffer = map.ptr().add(cbsize).cast::<T>();
         let initmap = MemoryMapInitialized::new(map, buffer, capacity);
 
-        (initmap, buffer, &mut *cbp)
+        (initmap, buffer)
     };
     let shared_map = std::sync::Arc::new(initmap);
 
     Ok((
-        Writer::new(shared_map.clone(), cb, buffer, capacity),
-        Reader::new(shared_map, cb, buffer, capacity),
+        Writer::new(shared_map.clone(), buffer, capacity),
+        Reader::new(shared_map, buffer, capacity),
     ))
 }
 

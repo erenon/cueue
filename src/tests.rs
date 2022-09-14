@@ -17,14 +17,14 @@ fn test_next_power_two() {
 
 #[test]
 fn test_capacity() {
-    let (w, r) = cueue::<'_, u8>(16).unwrap();
+    let (w, r) = cueue::<u8>(16).unwrap();
     assert_eq!(w.capacity(), r.capacity());
     assert!(w.capacity() >= 4096);
 }
 
 #[test]
 fn test_writer() {
-    let (mut w, r) = cueue::<'_, u8>(16).unwrap();
+    let (mut w, r) = cueue::<u8>(16).unwrap();
 
     let cap = w.capacity();
 
@@ -67,7 +67,7 @@ fn test_reader() {
 
 #[test]
 fn test_full() {
-    let (mut w, mut r) = cueue::<'_, u8>(16).unwrap();
+    let (mut w, mut r) = cueue::<u8>(16).unwrap();
 
     let buf = w.write_chunk();
     let buflen = buf.len();
