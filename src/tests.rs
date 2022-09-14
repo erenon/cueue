@@ -105,6 +105,30 @@ fn test_reuse() {
 }
 
 #[test]
+fn test_push() {
+    let (mut w, _) = cueue(16).unwrap();
+    let cap = w.capacity();
+
+    for i in 0..cap {
+        assert_eq!(w.push(i), Ok(()));
+    }
+
+    assert_eq!(w.push(0), Err(0));
+}
+
+#[test]
+fn test_push_string() {
+    let (mut w, _) = cueue(16).unwrap();
+    let cap = w.capacity();
+
+    for i in 0..cap {
+        assert_eq!(w.push(i.to_string()), Ok(()));
+    }
+
+    assert_eq!(w.push("foo".to_string()), Err("foo".to_string()));
+}
+
+#[test]
 fn test_cueue_threaded_w_r() {
     let (mut w, mut r) = cueue(16).unwrap();
     let maxi = 1_000_000;
