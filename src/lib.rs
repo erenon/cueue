@@ -1,21 +1,24 @@
 //! A high performance, single-producer, single-consumer, bounded circular buffer
-//! of contiguous bytes, that supports lock-free atomic batch operations,
+//! of contiguous elements, that supports lock-free atomic batch operations,
 //! suitable for inter-thread communication.
 //!
 //!```
-//!     let (mut w, mut r) = cueue::cueue(1 << 20).unwrap();
+//! let (mut w, mut r) = cueue::cueue(1 << 20).unwrap();
 //!
-//!     w.begin_write();
-//!     assert!(w.write_capacity() >= 9);
-//!     w.write(b"foo").unwrap();
-//!     w.write(b"bar").unwrap();
-//!     w.write(b"baz").unwrap();
-//!     w.end_write();
+//! let buf = w.write_chunk();
+//! assert!(buf.len() >= 9);
+//! buf[..9].copy_from_slice(b"foobarbaz");
+//! w.commit(9);
 //!
-//!     let read_result = r.begin_read();
-//!     assert_eq!(read_result, b"foobarbaz");
-//!     r.end_read();
-//! ```
+//! let read_result = r.read_chunk();
+//! assert_eq!(read_result, b"foobarbaz");
+//! r.commit();
+//!```
+//!
+//! Elements in the queue are always initialized, and not dropped until the queue is dropped.
+//! This allows re-use of elements (useful for elements with heap allocated contents),
+//! and prevents contention on the senders heap (by avoiding the consumer freeing memory
+//! the sender allocated).
 
 use std::ffi::CString;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -81,6 +84,8 @@ unsafe fn memoryfile() -> Result<OwnedFd, CError> {
     Ok(OwnedFd::from_raw_fd(memfd))
 }
 
+// TODO elems in the buffer must be dropped
+
 /// A chunk of memory allocated using mmap.
 ///
 /// Deallocates the memory on Drop.
@@ -108,6 +113,40 @@ impl Drop for MemoryMap {
         if !self.failed() {
             unsafe {
                 munmap(self.map, self.size);
+            }
+        }
+    }
+}
+
+struct MemoryMapInitialized<T> {
+    _map: MemoryMap,
+    buf: *mut T,
+    cap: usize,
+}
+
+impl<T> MemoryMapInitialized<T>
+where
+    T: Default,
+{
+    fn new(map: MemoryMap, buf: *mut T, cap: usize) -> Self {
+        for i in 0..cap {
+            unsafe {
+                buf.add(i).write(T::default());
+            }
+        }
+        Self {
+            _map: map,
+            buf,
+            cap,
+        }
+    }
+}
+
+impl<T> Drop for MemoryMapInitialized<T> {
+    fn drop(&mut self) {
+        for i in 0..self.cap {
+            unsafe {
+                self.buf.add(i).drop_in_place();
             }
         }
     }
@@ -227,153 +266,117 @@ struct ControlBlock {
 /// Writer of a Cueue.
 ///
 /// See examples/ for usage.
-pub struct Writer<'a> {
-    _mem: std::sync::Arc<MemoryMap>,
+pub struct Writer<'a, T> {
+    mem: std::sync::Arc<MemoryMapInitialized<T>>,
     cb: &'a ControlBlock,
     mask: u64,
 
-    buffer: *mut u8,
-    write_begin: *mut u8,
-    write_pos: *mut u8,
-    write_end: *mut u8,
+    buffer: *mut T,
+    write_begin: *mut T,
+    write_capacity: usize,
 }
 
-impl<'a> Writer<'a> {
+impl<'a, T> Writer<'a, T> {
     fn new(
-        mem: std::sync::Arc<MemoryMap>,
+        mem: std::sync::Arc<MemoryMapInitialized<T>>,
         cb: &'a ControlBlock,
-        buffer: *mut u8,
+        buffer: *mut T,
         capacity: usize,
     ) -> Self {
         Self {
-            _mem: mem,
+            mem,
             cb,
             mask: capacity as u64 - 1,
             buffer,
             write_begin: std::ptr::null_mut(),
-            write_pos: std::ptr::null_mut(),
-            write_end: std::ptr::null_mut(),
+            write_capacity: 0,
         }
     }
 
-    /// Maximum number of bytes the referenced `cueue` can hold.
+    /// Maximum number of elements the referenced `cueue` can hold.
     #[inline]
     pub fn capacity(&self) -> usize {
         (self.mask + 1) as usize
     }
 
-    /// Maximum number of bytes that can be yet written
-    /// before end_write + begin_write need to be called again.
-    #[inline]
-    pub fn write_capacity(&self) -> usize {
-        unsafe { self.write_end.offset_from(self.write_pos) as usize }
-    }
-
-    /// Maximize `write_capacity()`.
+    /// Get a writable slice of maximum available size.
     ///
-    /// Resets the internal write buffer, uncommitted writes
-    /// (those without subsequent end_write) will be lost.
+    /// The elements in the returned slice are either default initialized
+    /// (never written yet) or are the result of previous writes.
+    /// The writer is free to overwrite or reuse them.
     ///
-    /// Returns `write_capacity()`
-    pub fn begin_write(&mut self) -> usize {
+    /// After write, `commit` must be called, to make the written elements
+    /// available for reading.
+    pub fn write_chunk(&mut self) -> &mut [T] {
         let w = self.cb.write_position.0.load(Ordering::Relaxed);
         let r = self.cb.read_position.0.load(Ordering::Acquire);
 
         debug_assert!(r <= w);
         debug_assert!(r + self.capacity() as u64 >= w);
 
-        let wc = self.capacity() as u64 - (w.wrapping_sub(r));
         let wi = w & self.mask;
+        self.write_capacity = (self.capacity() as u64 - (w.wrapping_sub(r))) as usize;
 
-        self.write_begin = unsafe { self.buffer.offset(wi as isize) };
-        self.write_pos = self.write_begin;
-        self.write_end = unsafe { self.write_begin.offset(wc as isize) };
-
-        wc as usize
-    }
-
-    /// Attempt to satisfy `write_capacity() >= size`.
-    ///
-    /// Possibly calls begin_write, uncommitted writes
-    /// (those without subsequent end_write) will be lost.
-    ///
-    /// Returns `size <= write_capacity()`
-    #[inline]
-    pub fn begin_write_if_needed(&mut self, size: usize) -> bool {
-        if size <= self.write_capacity() {
-            true
-        } else {
-            size <= self.begin_write()
-        }
-    }
-
-    /// Attempt to copy `src` to the internal write buffer.
-    ///
-    /// Successful if write_capacity() >= src.len(), fails otherwise.
-    pub fn write(&mut self, src: &[u8]) -> Result<(), CError> {
-        if self.write_capacity() >= src.len() {
-            unsafe {
-                self.unchecked_write(src);
-            }
-            Ok(())
-        } else {
-            Err(CError {
-                hint: "Insufficient write_capacity",
-                err: std::io::ErrorKind::Other.into(),
-            })
-        }
-    }
-
-    /// Copy `src` to the internal write buffer.
-    ///
-    /// # Safety
-    /// Requires `write_capacity() >= src.len()`.
-    #[inline]
-    pub unsafe fn unchecked_write(&mut self, src: &[u8]) {
-        debug_assert!(self.write_capacity() >= src.len());
-
-        std::ptr::copy_nonoverlapping(src.as_ptr(), self.write_pos, src.len());
-        self.write_pos = self.write_pos.add(src.len());
-    }
-
-    /// Make the written parts of the internal write buffer available for reading.
-    pub fn end_write(&mut self) {
-        let w = self.cb.write_position.0.load(Ordering::Relaxed);
         unsafe {
-            let write_size = self.write_pos.offset_from(self.write_begin);
-            self.write_begin = self.write_begin.offset(write_size);
-            self.cb
-                .write_position
-                .0
-                .store(w + write_size as u64, Ordering::Release);
+            self.write_begin = self.buffer.offset(wi as isize);
+            std::slice::from_raw_parts_mut(self.write_begin, self.write_capacity)
         }
+    }
+
+    /// Make `n` number of elements, written to the slice returned by `write_chunk`
+    /// available for reading.
+    ///
+    /// `n` is checked: if too large, gets truncated to the maximum committable size.
+    ///
+    /// Returns the number of committed elements.
+    pub fn commit(&mut self, n: usize) -> usize {
+        let m = usize::min(self.write_capacity, n);
+        unsafe {
+            self.unchecked_commit(m);
+        }
+        m
+    }
+
+    unsafe fn unchecked_commit(&mut self, n: usize) {
+        let w = self.cb.write_position.0.load(Ordering::Relaxed);
+        self.write_begin = self.write_begin.add(n);
+        self.write_capacity -= n;
+        self.cb
+            .write_position
+            .0
+            .store(w + n as u64, Ordering::Release);
+    }
+
+    /// Returns true, if the Reader counterpart was dropped.
+    pub fn is_abandoned(&mut self) -> bool {
+        std::sync::Arc::get_mut(&mut self.mem).is_some()
     }
 }
 
-unsafe impl<'a> Send for Writer<'a> {}
+unsafe impl<'a, T> Send for Writer<'a, T> {}
 
 /// Reader of a Cueue.
 ///
 /// See examples/ for usage.
-pub struct Reader<'a> {
-    _mem: std::sync::Arc<MemoryMap>,
+pub struct Reader<'a, T> {
+    mem: std::sync::Arc<MemoryMapInitialized<T>>,
     cb: &'a ControlBlock,
     mask: u64,
 
-    buffer: *const u8,
-    read_begin: *const u8,
+    buffer: *const T,
+    read_begin: *const T,
     read_size: u64,
 }
 
-impl<'a> Reader<'a> {
+impl<'a, T> Reader<'a, T> {
     fn new(
-        mem: std::sync::Arc<MemoryMap>,
+        mem: std::sync::Arc<MemoryMapInitialized<T>>,
         cb: &'a ControlBlock,
-        buffer: *const u8,
+        buffer: *const T,
         capacity: usize,
     ) -> Self {
         Self {
-            _mem: mem,
+            mem,
             cb,
             mask: capacity as u64 - 1,
             buffer,
@@ -382,14 +385,14 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Maximum number of bytes the referenced `cueue` can hold.
+    /// Maximum number of elements the referenced `cueue` can hold.
     #[inline]
     pub fn capacity(&self) -> usize {
         (self.mask + 1) as usize
     }
 
-    /// Return a slice of bytes written and committed by the Writer.
-    pub fn begin_read(&mut self) -> &'a [u8] {
+    /// Return a slice of elements written and committed by the Writer.
+    pub fn read_chunk(&mut self) -> &'a [T] {
         let w = self.cb.write_position.0.load(Ordering::Acquire);
         let r = self.cb.read_position.0.load(Ordering::Relaxed);
 
@@ -398,24 +401,31 @@ impl<'a> Reader<'a> {
 
         let ri = r & self.mask;
 
-        self.read_begin = unsafe { self.buffer.offset(ri as isize) };
         self.read_size = w - r;
 
-        unsafe { std::slice::from_raw_parts(self.read_begin, self.read_size as usize) }
+        unsafe {
+            self.read_begin = self.buffer.offset(ri as isize);
+            std::slice::from_raw_parts(self.read_begin, self.read_size as usize)
+        }
     }
 
-    /// Mark the slice previously acquired by `begin_read` as consumed,
+    /// Mark the slice previously acquired by `read_chunk` as consumed,
     /// making it available for writing.
-    pub fn end_read(&mut self) {
+    pub fn commit(&mut self) {
         let r = self.cb.read_position.0.load(Ordering::Relaxed);
         self.cb
             .read_position
             .0
             .store(r + self.read_size, Ordering::Release);
     }
+
+    /// Returns true, if the Writer counterpart was dropped.
+    pub fn is_abandoned(&mut self) -> bool {
+        std::sync::Arc::get_mut(&mut self.mem).is_some()
+    }
 }
 
-unsafe impl<'a> Send for Reader<'a> {}
+unsafe impl<'a, T> Send for Reader<'a, T> {}
 
 /// Create a single-producer, single-consumer `Cueue`.
 ///
@@ -426,8 +436,11 @@ unsafe impl<'a> Send for Reader<'a> {}
 /// `requested_capacity` must not be bigger than 2^63.
 ///
 /// On success, returns a `(Writer, Reader)` pair, that share the ownership
-/// of the underlying circular byte array.
-pub fn cueue<'a>(requested_capacity: usize) -> Result<(Writer<'a>, Reader<'a>), CError> {
+/// of the underlying circular array.
+pub fn cueue<'a, T>(requested_capacity: usize) -> Result<(Writer<'a, T>, Reader<'a, T>), CError>
+where
+    T: Default,
+{
     let pagesize = unsafe { sysconf(_SC_PAGESIZE) as usize };
     let capacity = next_power_two(usize::max(requested_capacity, pagesize))?;
     let cbsize = pagesize;
@@ -439,19 +452,26 @@ pub fn cueue<'a>(requested_capacity: usize) -> Result<(Writer<'a>, Reader<'a>), 
         });
     }
 
-    let (mut map, cb) = unsafe {
+    let (initmap, buffer, cb) = unsafe {
         let f = memoryfile()?;
-        if ftruncate(f.as_raw_fd(), (cbsize + capacity) as i64) != 0 {
+        let bufsize = capacity * std::mem::size_of::<T>();
+        if ftruncate(f.as_raw_fd(), (cbsize + bufsize) as i64) != 0 {
             return Err(CError::new("ftruncate"));
         }
-        let mut map = doublemap(f.as_raw_fd(), cbsize, capacity)?;
+        let mut map = doublemap(f.as_raw_fd(), cbsize, bufsize)?;
 
+        // initialize control block
         let cbp = map.ptr() as *mut ControlBlock;
         cbp.write(ControlBlock::default());
-        (map, &mut *cbp)
+
+        // default initialize elems.
+        // this is required to make sure writer always sees initialized elements
+        let buffer = map.ptr().add(cbsize).cast::<T>();
+        let initmap = MemoryMapInitialized::new(map, buffer, capacity);
+
+        (initmap, buffer, &mut *cbp)
     };
-    let buffer = unsafe { map.ptr().add(cbsize) };
-    let shared_map = std::sync::Arc::new(map);
+    let shared_map = std::sync::Arc::new(initmap);
 
     Ok((
         Writer::new(shared_map.clone(), cb, buffer, capacity),
