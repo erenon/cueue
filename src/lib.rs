@@ -351,6 +351,18 @@ impl<'a, T> Writer<'a, T> {
     pub fn is_abandoned(&mut self) -> bool {
         std::sync::Arc::get_mut(&mut self.mem).is_some()
     }
+
+    /// Write and commit a single element, or return it if the queue was full.
+    pub fn push(&mut self, t: T) -> Result<(), T> {
+        let chunk = self.write_chunk();
+        if !chunk.is_empty() {
+            chunk[0] = t;
+            self.commit(1);
+            Ok(())
+        } else {
+            Err(t)
+        }
+    }
 }
 
 unsafe impl<'a, T> Send for Writer<'a, T> {}
