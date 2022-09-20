@@ -362,13 +362,13 @@ where
     }
 
     #[inline]
-    fn write_pos(&mut self) -> &mut std::sync::atomic::AtomicU64 {
-        unsafe { &mut (*self.cb).write_position.0 }
+    fn write_pos(&self) -> &std::sync::atomic::AtomicU64 {
+        unsafe { &(*self.cb).write_position.0 }
     }
 
     #[inline]
-    fn read_pos(&mut self) -> &mut std::sync::atomic::AtomicU64 {
-        unsafe { &mut (*self.cb).read_position.0 }
+    fn read_pos(&self) -> &std::sync::atomic::AtomicU64 {
+        unsafe { &(*self.cb).read_position.0 }
     }
 }
 
@@ -445,13 +445,13 @@ where
     }
 
     #[inline]
-    fn write_pos(&mut self) -> &mut std::sync::atomic::AtomicU64 {
-        unsafe { &mut (*self.cb).write_position.0 }
+    fn write_pos(&self) -> &std::sync::atomic::AtomicU64 {
+        unsafe { &(*self.cb).write_position.0 }
     }
 
     #[inline]
-    fn read_pos(&mut self) -> &mut std::sync::atomic::AtomicU64 {
-        unsafe { &mut (*self.cb).read_position.0 }
+    fn read_pos(&self) -> &std::sync::atomic::AtomicU64 {
+        unsafe { &(*self.cb).read_position.0 }
     }
 }
 
