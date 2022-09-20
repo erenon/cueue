@@ -345,8 +345,8 @@ where
     }
 
     /// Returns true, if the Reader counterpart was dropped.
-    pub fn is_abandoned(&mut self) -> bool {
-        std::sync::Arc::get_mut(&mut self.mem).is_some()
+    pub fn is_abandoned(&self) -> bool {
+        std::sync::Arc::strong_count(&self.mem) < 2
     }
 
     /// Write and commit a single element, or return it if the queue was full.
@@ -440,8 +440,8 @@ where
     }
 
     /// Returns true, if the Writer counterpart was dropped.
-    pub fn is_abandoned(&mut self) -> bool {
-        std::sync::Arc::get_mut(&mut self.mem).is_some()
+    pub fn is_abandoned(&self) -> bool {
+        std::sync::Arc::strong_count(&self.mem) < 2
     }
 
     #[inline]
