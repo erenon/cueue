@@ -29,4 +29,11 @@ jobs:
           cargo test --release
           cargo doc
 
-
+  build_windows:
+    name: Build on Windows (stub)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build
+        run: |
+          cargo build
