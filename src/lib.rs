@@ -20,11 +20,15 @@
 //! and prevents contention on the senders heap (by avoiding the consumer freeing memory
 //! the sender allocated).
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::ffi::CString;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::Ordering;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use libc::{c_void, ftruncate, mmap, munmap, sysconf};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use libc::{
     MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE,
     _SC_PAGESIZE,
@@ -84,16 +88,21 @@ unsafe fn memoryfile() -> Result<OwnedFd, CError> {
     Ok(OwnedFd::from_raw_fd(memfd))
 }
 
-// TODO elems in the buffer must be dropped
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+unsafe fn memoryfile() {
+    todo!("Only Linux and macOS are supported so far");
+}
 
 /// A chunk of memory allocated using mmap.
 ///
 /// Deallocates the memory on Drop.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct MemoryMap {
     map: *mut c_void,
     size: usize,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl MemoryMap {
     fn new(map: *mut c_void, size: usize) -> Self {
         Self { map, size }
@@ -108,6 +117,7 @@ impl MemoryMap {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Drop for MemoryMap {
     fn drop(&mut self) {
         if !self.failed() {
@@ -115,6 +125,16 @@ impl Drop for MemoryMap {
                 munmap(self.map, self.size);
             }
         }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+struct MemoryMap {}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+impl MemoryMap {
+    fn ptr(&self) -> *mut u8 {
+        todo!("Only Linux and macOS are supported so far");
     }
 }
 
@@ -159,13 +179,14 @@ fn platform_flags() -> i32 {
     libc::MAP_POPULATE
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(not(target_os = "linux"))]
 fn platform_flags() -> i32 {
     0
 }
 
 /// Map a `size` chunk of `fd` at `offset` twice, next to each other in virtual memory
 /// The size of the file pointed by `fd` must be >= offset + size.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> Result<MemoryMap, CError> {
     // Create a map, offset + twice the size, to get a suitable virtual address which will work with MAP_FIXED
     let rw = PROT_READ | PROT_WRITE;
@@ -220,6 +241,11 @@ unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> Result<MemoryMap, 
     // -> No need to munmap `first_map` and `second_map`, drop(map) will do both
 
     Ok(map)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+unsafe fn doublemap() {
+    todo!("Only Linux and macOS are supported so far");
 }
 
 /// Returns smallest power of 2 not smaller than `n`,
@@ -467,6 +493,7 @@ unsafe impl<T> Send for Reader<T> {}
 ///
 /// On success, returns a `(Writer, Reader)` pair, that share the ownership
 /// of the underlying circular array.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn cueue<T>(requested_capacity: usize) -> Result<(Writer<T>, Reader<T>), CError>
 where
     T: Default,
@@ -507,6 +534,14 @@ where
         Writer::new(shared_map.clone(), buffer, capacity),
         Reader::new(shared_map, buffer, capacity),
     ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn cueue<T>(requested_capacity: usize) -> Result<(Writer<T>, Reader<T>), CError>
+where
+    T: Default,
+{
+    todo!("Only Linux and macOS are supported so far");
 }
 
 #[cfg(test)]
