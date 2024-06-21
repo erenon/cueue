@@ -20,89 +20,22 @@
 //! and prevents contention on the senders heap (by avoiding the consumer freeing memory
 //! the sender allocated).
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::ffi::CString;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+mod double_map;
+
+use libc::{c_void, MAP_FAILED, _SC_PAGESIZE};
+
+use std::io::{Error, ErrorKind};
+use std::os::fd::AsRawFd;
 use std::sync::atomic::Ordering;
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use libc::{c_void, ftruncate, mmap, munmap, sysconf};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use libc::{
-    MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE,
-    _SC_PAGESIZE,
-};
-
-/// Wraps POSIX C errno with an additional hint.
-///
-/// The hint is used to identify the opration that triggered the error.
-pub struct CError {
-    hint: &'static str,
-    err: std::io::Error,
-}
-
-impl CError {
-    /// Create a new CError from the given hint and the current errno.
-    fn new(hint: &'static str) -> Self {
-        Self {
-            hint,
-            err: std::io::Error::last_os_error(),
-        }
-    }
-}
-
-impl std::fmt::Debug for CError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.hint, self.err)
-    }
-}
-
-/// Create a file descriptor that points to a location in memory.
-#[cfg(target_os = "linux")]
-unsafe fn memoryfile() -> Result<OwnedFd, CError> {
-    let name = CString::new("cueue").unwrap();
-    let memfd = libc::memfd_create(name.as_ptr(), 0);
-    if memfd < 0 {
-        return Err(CError::new("memfd_create"));
-    }
-    Ok(OwnedFd::from_raw_fd(memfd))
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn memoryfile() -> Result<OwnedFd, CError> {
-    let path = CString::new("/tmp/cueue_XXXXXX").unwrap();
-    let path_cstr = path.into_raw();
-    let tmpfd = libc::mkstemp(path_cstr);
-    let path = CString::from_raw(path_cstr);
-    if tmpfd < 0 {
-        return Err(CError::new("mkstemp"));
-    }
-    let memfd = libc::shm_open(path.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL);
-    libc::unlink(path.as_ptr());
-    libc::close(tmpfd);
-    if memfd < 0 {
-        return Err(CError::new("shm_open"));
-    }
-
-    Ok(OwnedFd::from_raw_fd(memfd))
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-unsafe fn memoryfile() {
-    todo!("Only Linux and macOS are supported so far");
-}
 
 /// A chunk of memory allocated using mmap.
 ///
 /// Deallocates the memory on Drop.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct MemoryMap {
     map: *mut c_void,
     size: usize,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl MemoryMap {
     fn new(map: *mut c_void, size: usize) -> Self {
         Self { map, size }
@@ -117,24 +50,11 @@ impl MemoryMap {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Drop for MemoryMap {
     fn drop(&mut self) {
         if !self.failed() {
-            unsafe {
-                munmap(self.map, self.size);
-            }
+            unsafe { libc::munmap(self.map, self.size) };
         }
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-struct MemoryMap {}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-impl MemoryMap {
-    fn ptr(&self) -> *mut u8 {
-        todo!("Only Linux and macOS are supported so far");
     }
 }
 
@@ -158,7 +78,7 @@ where
     }
 
     #[inline]
-    fn controlblock(&self) -> *mut ControlBlock {
+    fn control_block(&self) -> *mut ControlBlock {
         self.map.ptr().cast::<ControlBlock>()
     }
 }
@@ -170,105 +90,6 @@ impl<T> Drop for MemoryMapInitialized<T> {
                 self.buf.add(i).drop_in_place();
             }
         }
-    }
-}
-
-/// Platform specific flags that increase performance, but not required.
-#[cfg(target_os = "linux")]
-fn platform_flags() -> i32 {
-    libc::MAP_POPULATE
-}
-
-#[cfg(not(target_os = "linux"))]
-fn platform_flags() -> i32 {
-    0
-}
-
-/// Map a `size` chunk of `fd` at `offset` twice, next to each other in virtual memory
-/// The size of the file pointed by `fd` must be >= offset + size.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> Result<MemoryMap, CError> {
-    // Create a map, offset + twice the size, to get a suitable virtual address which will work with MAP_FIXED
-    let rw = PROT_READ | PROT_WRITE;
-    let mapsize = offset + size * 2;
-    let map = MemoryMap::new(
-        mmap(
-            std::ptr::null_mut(),
-            mapsize,
-            rw,
-            MAP_PRIVATE | MAP_ANONYMOUS,
-            -1,
-            0,
-        ),
-        mapsize,
-    );
-    if map.failed() {
-        return Err(CError::new("mmap 1"));
-    }
-
-    // Map f twice, put maps next to each other with MAP_FIXED
-    // MAP_SHARED is required to have the changes propagated between maps
-    let first_addr = map.ptr().add(offset) as *mut c_void;
-    let first_map = mmap(
-        first_addr,
-        size,
-        rw,
-        MAP_SHARED | MAP_FIXED | platform_flags(),
-        fd,
-        offset as i64,
-    );
-    if first_map != first_addr {
-        return Err(CError::new("mmap 2"));
-    }
-
-    let second_addr = map.ptr().add(offset + size) as *mut c_void;
-    let second_map = mmap(
-        second_addr,
-        size,
-        rw,
-        MAP_SHARED | MAP_FIXED,
-        fd,
-        offset as i64,
-    );
-    if second_map != second_addr {
-        return Err(CError::new("mmap 3"));
-    }
-
-    // man mmap:
-    // If the memory region specified by addr and len overlaps
-    // pages of any existing mapping(s), then the overlapped part
-    // of the existing mapping(s) will be discarded.
-    // -> No need to munmap `first_map` and `second_map`, drop(map) will do both
-
-    Ok(map)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-unsafe fn doublemap() {
-    todo!("Only Linux and macOS are supported so far");
-}
-
-/// Returns smallest power of 2 not smaller than `n`,
-/// or an error if the expected result cannot be represented by the return type.
-fn next_power_two(n: usize) -> Result<usize, CError> {
-    if n == 0 {
-        return Ok(1);
-    }
-
-    let mut m = n - 1;
-    let mut result = 1;
-    while m != 0 {
-        m >>= 1;
-        result <<= 1;
-    }
-
-    if result >= n {
-        Ok(result)
-    } else {
-        Err(CError {
-            hint: "next_power_two",
-            err: std::io::ErrorKind::Other.into(),
-        })
     }
 }
 
@@ -308,7 +129,7 @@ where
     T: Default,
 {
     fn new(mem: std::sync::Arc<MemoryMapInitialized<T>>, buffer: *mut T, capacity: usize) -> Self {
-        let cb = mem.controlblock();
+        let cb = mem.control_block();
         Self {
             mem,
             cb,
@@ -321,7 +142,7 @@ where
 
     /// Maximum number of elements the referenced `cueue` can hold.
     #[inline]
-    pub fn capacity(&self) -> usize {
+    pub const fn capacity(&self) -> usize {
         (self.mask + 1) as usize
     }
 
@@ -422,7 +243,7 @@ where
         buffer: *const T,
         capacity: usize,
     ) -> Self {
-        let cb = mem.controlblock();
+        let cb = mem.control_block();
         Self {
             mem,
             cb,
@@ -435,7 +256,7 @@ where
 
     /// Maximum number of elements the referenced `cueue` can hold.
     #[inline]
-    pub fn capacity(&self) -> usize {
+    pub const fn capacity(&self) -> usize {
         (self.mask + 1) as usize
     }
 
@@ -465,9 +286,30 @@ where
         self.read_pos().store(r + rs, Ordering::Release);
     }
 
+    /// Mark the first n elements previously acquired by `read_chunk` as consumed,
+    /// making it available for writing.
+    pub fn commit_read(&mut self, n: usize) {
+        let rs = n as u64;
+        assert!(rs <= self.read_size);
+        let r = self.read_pos().load(Ordering::Relaxed);
+        self.read_pos().store(r + rs, Ordering::Release);
+    }
+
     /// Returns true, if the Writer counterpart was dropped.
     pub fn is_abandoned(&self) -> bool {
         std::sync::Arc::strong_count(&self.mem) < 2
+    }
+
+    /// Read and commit a single element, or return None if the queue was empty.
+    pub fn pop(&mut self) -> Option<T> {
+        let chunk = self.read_chunk();
+        if chunk.is_empty() {
+            None
+        } else {
+            let r: T = std::mem::take(unsafe { &mut *(chunk.as_ptr() as *mut T) });
+            self.commit_read(1);
+            Some(r)
+        }
     }
 
     #[inline]
@@ -493,55 +335,47 @@ unsafe impl<T> Send for Reader<T> {}
 ///
 /// On success, returns a `(Writer, Reader)` pair, that share the ownership
 /// of the underlying circular array.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub fn cueue<T>(requested_capacity: usize) -> Result<(Writer<T>, Reader<T>), CError>
+pub fn cueue<T>(requested_capacity: usize) -> Result<(Writer<T>, Reader<T>), Error>
 where
     T: Default,
 {
-    let pagesize = unsafe { sysconf(_SC_PAGESIZE) as usize };
-    let capacity = next_power_two(usize::max(requested_capacity, pagesize))?;
-    let cbsize = pagesize;
+    let pagesize = unsafe { libc::sysconf(_SC_PAGESIZE) as usize };
+    let capacity = requested_capacity.max(pagesize).next_power_of_two();
+    let cb_size = pagesize;
 
     if std::mem::size_of::<ControlBlock>() > pagesize {
-        return Err(CError {
-            hint: "ControlBlock does not fit in a single page",
-            err: std::io::ErrorKind::Other.into(),
-        });
+        return Err(Error::new(
+            ErrorKind::Other,
+            "ControlBlock does not fit in a single page",
+        ));
     }
 
-    let (initmap, buffer) = unsafe {
-        let f = memoryfile()?;
-        let bufsize = capacity * std::mem::size_of::<T>();
-        if ftruncate(f.as_raw_fd(), (cbsize + bufsize) as i64) != 0 {
-            return Err(CError::new("ftruncate"));
+    let (init_map, buffer) = unsafe {
+        let f = double_map::memory_file()?;
+        let buf_size = capacity * std::mem::size_of::<T>();
+        if libc::ftruncate(f.as_raw_fd(), (cb_size + buf_size) as i64) != 0 {
+            return Err(Error::new(ErrorKind::Other, "ftruncate"));
         }
-        let map = doublemap(f.as_raw_fd(), cbsize, bufsize)?;
+        let map = double_map::double_map(f.as_raw_fd(), cb_size, buf_size)?;
 
         // initialize control block
         let cbp = map.ptr() as *mut ControlBlock;
         cbp.write(ControlBlock::default());
 
-        // default initialize elems.
+        // default initialize elements.
         // this is required to make sure writer always sees initialized elements
-        let buffer = map.ptr().add(cbsize).cast::<T>();
-        let initmap = MemoryMapInitialized::new(map, buffer, capacity);
+        let buffer = map.ptr().add(cb_size).cast::<T>();
+        let init_map = MemoryMapInitialized::new(map, buffer, capacity);
 
-        (initmap, buffer)
+        (init_map, buffer)
     };
-    let shared_map = std::sync::Arc::new(initmap);
+
+    let shared_map = std::sync::Arc::new(init_map);
 
     Ok((
         Writer::new(shared_map.clone(), buffer, capacity),
         Reader::new(shared_map, buffer, capacity),
     ))
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn cueue<T>(requested_capacity: usize) -> Result<(Writer<T>, Reader<T>), CError>
-where
-    T: Default,
-{
-    todo!("Only Linux and macOS are supported so far");
 }
 
 #[cfg(test)]

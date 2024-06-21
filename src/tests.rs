@@ -1,25 +1,13 @@
 use crate::*;
 
 #[test]
-fn test_next_power_two() {
-    assert_eq!(1, next_power_two(0).unwrap());
-    assert_eq!(1, next_power_two(1).unwrap());
-    assert_eq!(2, next_power_two(2).unwrap());
-    assert_eq!(4, next_power_two(3).unwrap());
-    assert_eq!(4, next_power_two(4).unwrap());
-    assert_eq!(8, next_power_two(5).unwrap());
-    assert_eq!(4096, next_power_two(4095).unwrap());
-    assert_eq!(4096, next_power_two(4096).unwrap());
-
-    assert_eq!(1 << 63, next_power_two(1 << 63).unwrap());
-    assert!(next_power_two((1 << 63) + 1).is_err());
-}
-
-#[test]
 fn test_capacity() {
     let (w, r) = cueue::<u8>(16).unwrap();
     assert_eq!(w.capacity(), r.capacity());
-    assert!(w.capacity() >= 4096);
+    assert_eq!(w.capacity(), 4096);
+
+    let (w, _r) = cueue::<u8>(4097).unwrap();
+    assert_eq!(w.capacity(), 8192);
 }
 
 #[test]
@@ -66,6 +54,30 @@ fn test_reader() {
 }
 
 #[test]
+fn test_commit_read() {
+    let (mut w, mut r) = cueue(16).unwrap();
+
+    let empty = r.read_chunk();
+    assert_eq!(empty.len(), 0);
+    r.commit();
+
+    let buf = w.write_chunk();
+    buf[..3].copy_from_slice(b"foo");
+    w.commit(3);
+
+    let foo = r.read_chunk();
+    assert_eq!(foo, b"foo");
+    r.commit_read(1);
+
+    let foo = r.read_chunk();
+    assert_eq!(foo, b"oo");
+    r.commit_read(2);
+
+    let empty = r.read_chunk();
+    assert!(empty.is_empty());
+}
+
+#[test]
 fn test_full() {
     let (mut w, mut r) = cueue::<u8>(16).unwrap();
 
@@ -88,7 +100,7 @@ fn test_reuse() {
 
     // fill the queue with strings
     let buf = w.write_chunk();
-    for s in buf.into_iter() {
+    for s in buf.iter_mut() {
         *s = "foobar";
     }
     let buflen = buf.len();
@@ -117,6 +129,24 @@ fn test_push() {
 }
 
 #[test]
+fn test_pop() {
+    let (mut w, mut r) = cueue(16).unwrap();
+    let cap = w.capacity();
+
+    for i in 0..cap {
+        assert_eq!(w.push(i), Ok(()));
+    }
+
+    assert_eq!(w.push(0), Err(0));
+
+    for i in 0..cap {
+        assert_eq!(r.pop(), Some(i));
+    }
+
+    assert_eq!(r.pop(), None);
+}
+
+#[test]
 fn test_push_string() {
     let (mut w, _) = cueue(16).unwrap();
     let cap = w.capacity();
@@ -138,7 +168,7 @@ fn test_cueue_threaded_w_r() {
         for _ in 0..maxi {
             let buf = loop {
                 let buf = w.write_chunk();
-                if buf.len() > 0 {
+                if !buf.is_empty() {
                     break buf;
                 }
             };
