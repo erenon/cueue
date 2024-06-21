@@ -22,76 +22,10 @@
 
 mod double_map;
 
-use libc::{c_void, MAP_FAILED, _SC_PAGESIZE};
+use double_map::MemoryMapInitialized;
 
 use std::io::{Error, ErrorKind};
-use std::os::fd::AsRawFd;
 use std::sync::atomic::Ordering;
-
-/// A chunk of memory allocated using mmap.
-///
-/// Deallocates the memory on Drop.
-struct MemoryMap {
-    map: *mut c_void,
-    size: usize,
-}
-
-impl MemoryMap {
-    fn new(map: *mut c_void, size: usize) -> Self {
-        Self { map, size }
-    }
-
-    fn failed(&self) -> bool {
-        self.map == MAP_FAILED
-    }
-
-    fn ptr(&self) -> *mut u8 {
-        self.map as *mut u8
-    }
-}
-
-impl Drop for MemoryMap {
-    fn drop(&mut self) {
-        if !self.failed() {
-            unsafe { libc::munmap(self.map, self.size) };
-        }
-    }
-}
-
-struct MemoryMapInitialized<T> {
-    map: MemoryMap,
-    buf: *mut T,
-    cap: usize,
-}
-
-impl<T> MemoryMapInitialized<T>
-where
-    T: Default,
-{
-    fn new(map: MemoryMap, buf: *mut T, cap: usize) -> Self {
-        for i in 0..cap {
-            unsafe {
-                buf.add(i).write(T::default());
-            }
-        }
-        Self { map, buf, cap }
-    }
-
-    #[inline]
-    fn control_block(&self) -> *mut ControlBlock {
-        self.map.ptr().cast::<ControlBlock>()
-    }
-}
-
-impl<T> Drop for MemoryMapInitialized<T> {
-    fn drop(&mut self) {
-        for i in 0..self.cap {
-            unsafe {
-                self.buf.add(i).drop_in_place();
-            }
-        }
-    }
-}
 
 /// Force an AtomicU64 to a separate cache-line to avoid false-sharing.
 /// This wrapper is needed as I was unable to specify alignment for individual fields.
@@ -129,7 +63,7 @@ where
     T: Default,
 {
     fn new(mem: std::sync::Arc<MemoryMapInitialized<T>>, buffer: *mut T, capacity: usize) -> Self {
-        let cb = mem.control_block();
+        let cb = mem.control_block() as *mut ControlBlock;
         Self {
             mem,
             cb,
@@ -243,7 +177,7 @@ where
         buffer: *const T,
         capacity: usize,
     ) -> Self {
-        let cb = mem.control_block();
+        let cb = mem.control_block() as *mut ControlBlock;
         Self {
             mem,
             cb,
@@ -339,9 +273,7 @@ pub fn cueue<T>(requested_capacity: usize) -> Result<(Writer<T>, Reader<T>), Err
 where
     T: Default,
 {
-    let pagesize = unsafe { libc::sysconf(_SC_PAGESIZE) as usize };
-    let capacity = requested_capacity.max(pagesize).next_power_of_two();
-    let cb_size = pagesize;
+    let pagesize = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
 
     if std::mem::size_of::<ControlBlock>() > pagesize {
         return Err(Error::new(
@@ -350,25 +282,9 @@ where
         ));
     }
 
-    let (init_map, buffer) = unsafe {
-        let f = double_map::memory_file()?;
-        let buf_size = capacity * std::mem::size_of::<T>();
-        if libc::ftruncate(f.as_raw_fd(), (cb_size + buf_size) as i64) != 0 {
-            return Err(Error::new(ErrorKind::Other, "ftruncate"));
-        }
-        let map = double_map::double_map(f.as_raw_fd(), cb_size, buf_size)?;
-
-        // initialize control block
-        let cbp = map.ptr() as *mut ControlBlock;
-        cbp.write(ControlBlock::default());
-
-        // default initialize elements.
-        // this is required to make sure writer always sees initialized elements
-        let buffer = map.ptr().add(cb_size).cast::<T>();
-        let init_map = MemoryMapInitialized::new(map, buffer, capacity);
-
-        (init_map, buffer)
-    };
+    let init_map = double_map::MemoryMapInitialized::new(requested_capacity)?;
+    let buffer = init_map.buffer();
+    let capacity = init_map.capacity();
 
     let shared_map = std::sync::Arc::new(init_map);
 
@@ -377,6 +293,3 @@ where
         Reader::new(shared_map, buffer, capacity),
     ))
 }
-
-#[cfg(test)]
-mod tests;

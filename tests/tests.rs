@@ -1,4 +1,4 @@
-use crate::*;
+use cueue::*;
 
 #[test]
 fn test_capacity() {
