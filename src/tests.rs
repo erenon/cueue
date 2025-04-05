@@ -66,6 +66,32 @@ fn test_reader() {
 }
 
 #[test]
+fn test_limited_read_chunk() {
+    let (mut w, mut r) = cueue(16).unwrap();
+
+    let empty = r.limited_read_chunk(8);
+    assert_eq!(empty.len(), 0);
+    r.commit();
+
+    let buf = w.write_chunk();
+    buf[..3].copy_from_slice(b"foo");
+    w.commit(3);
+
+    let foo = r.limited_read_chunk(1);
+    assert_eq!(foo, b"f");
+    r.commit();
+
+    let foo = r.limited_read_chunk(4);
+    assert_eq!(foo, b"oo");
+    let foo = r.limited_read_chunk(2);
+    assert_eq!(foo, b"oo");
+    r.commit();
+
+    let empty = r.limited_read_chunk(2);
+    assert_eq!(empty.len(), 0);
+}
+
+#[test]
 fn test_full() {
     let (mut w, mut r) = cueue::<u8>(16).unwrap();
 

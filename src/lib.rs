@@ -457,6 +457,27 @@ where
         }
     }
 
+    /// Return a slice of elements written and committed by the Writer.
+    ///
+    /// The length of the returned slice will be less or equal than `n`.
+    pub fn limited_read_chunk(&mut self, n: u64) -> &[T] {
+        let w = self.write_pos().load(Ordering::Acquire);
+        let r = self.read_pos().load(Ordering::Relaxed);
+
+        debug_assert!(r <= w);
+        debug_assert!(r + self.capacity() as u64 >= w);
+
+        let ri = r & self.mask;
+        let rs = n.min(w - r);
+
+        self.read_size = rs;
+
+        unsafe {
+            self.read_begin = self.buffer.add(ri as usize);
+            std::slice::from_raw_parts(self.read_begin, self.read_size as usize)
+        }
+    }
+
     /// Mark the slice previously acquired by `read_chunk` as consumed,
     /// making it available for writing.
     pub fn commit(&mut self) {
