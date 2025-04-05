@@ -34,55 +34,35 @@ use libc::{
     _SC_PAGESIZE,
 };
 
-/// Wraps POSIX C errno with an additional hint.
-///
-/// The hint is used to identify the opration that triggered the error.
-pub struct CError {
-    hint: &'static str,
-    err: std::io::Error,
-}
-
-impl CError {
-    /// Create a new CError from the given hint and the current errno.
-    fn new(hint: &'static str) -> Self {
-        Self {
-            hint,
-            err: std::io::Error::last_os_error(),
-        }
-    }
-}
-
-impl std::fmt::Debug for CError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.hint, self.err)
-    }
+fn errno_with_hint(hint: &str) -> std::io::Error {
+    std::io::Error::new(std::io::Error::last_os_error().kind(), hint)
 }
 
 /// Create a file descriptor that points to a location in memory.
 #[cfg(target_os = "linux")]
-unsafe fn memoryfile() -> Result<OwnedFd, CError> {
+unsafe fn memoryfile() -> Result<OwnedFd, std::io::Error> {
     let name = CString::new("cueue").unwrap();
     let memfd = libc::memfd_create(name.as_ptr(), 0);
     if memfd < 0 {
-        return Err(CError::new("memfd_create"));
+        return Err(errno_with_hint("memfd_create"));
     }
     Ok(OwnedFd::from_raw_fd(memfd))
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn memoryfile() -> Result<OwnedFd, CError> {
+unsafe fn memoryfile() -> Result<OwnedFd, std::io::Error> {
     let path = CString::new("/tmp/cueue_XXXXXX").unwrap();
     let path_cstr = path.into_raw();
     let tmpfd = libc::mkstemp(path_cstr);
     let path = CString::from_raw(path_cstr);
     if tmpfd < 0 {
-        return Err(CError::new("mkstemp"));
+        return Err(errno_with_hint("mkstemp"));
     }
     let memfd = libc::shm_open(path.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL);
     libc::unlink(path.as_ptr());
     libc::close(tmpfd);
     if memfd < 0 {
-        return Err(CError::new("shm_open"));
+        return Err(errno_with_hint("shm_open"));
     }
 
     Ok(OwnedFd::from_raw_fd(memfd))
@@ -187,7 +167,7 @@ fn platform_flags() -> i32 {
 /// Map a `size` chunk of `fd` at `offset` twice, next to each other in virtual memory
 /// The size of the file pointed by `fd` must be >= offset + size.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> Result<MemoryMap, CError> {
+unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> Result<MemoryMap, std::io::Error> {
     // Create a map, offset + twice the size, to get a suitable virtual address which will work with MAP_FIXED
     let rw = PROT_READ | PROT_WRITE;
     let mapsize = offset + size * 2;
@@ -203,7 +183,7 @@ unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> Result<MemoryMap, 
         mapsize,
     );
     if map.failed() {
-        return Err(CError::new("mmap 1"));
+        return Err(errno_with_hint("mmap 1"));
     }
 
     // Map f twice, put maps next to each other with MAP_FIXED
@@ -218,7 +198,7 @@ unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> Result<MemoryMap, 
         offset as i64,
     );
     if first_map != first_addr {
-        return Err(CError::new("mmap 2"));
+        return Err(errno_with_hint("mmap 2"));
     }
 
     let second_addr = map.ptr().add(offset + size) as *mut c_void;
@@ -231,7 +211,7 @@ unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> Result<MemoryMap, 
         offset as i64,
     );
     if second_map != second_addr {
-        return Err(CError::new("mmap 3"));
+        return Err(errno_with_hint("mmap 3"));
     }
 
     // man mmap:
@@ -250,7 +230,7 @@ unsafe fn doublemap() {
 
 /// Returns smallest power of 2 not smaller than `n`,
 /// or an error if the expected result cannot be represented by the return type.
-fn next_power_two(n: usize) -> Result<usize, CError> {
+fn next_power_two(n: usize) -> Result<usize, std::io::Error> {
     if n == 0 {
         return Ok(1);
     }
@@ -265,10 +245,10 @@ fn next_power_two(n: usize) -> Result<usize, CError> {
     if result >= n {
         Ok(result)
     } else {
-        Err(CError {
-            hint: "next_power_two",
-            err: std::io::ErrorKind::Other.into(),
-        })
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "next_power_two",
+        ))
     }
 }
 
@@ -515,7 +495,7 @@ unsafe impl<T> Send for Reader<T> {}
 /// On success, returns a `(Writer, Reader)` pair, that share the ownership
 /// of the underlying circular array.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub fn cueue<T>(requested_capacity: usize) -> Result<(Writer<T>, Reader<T>), CError>
+pub fn cueue<T>(requested_capacity: usize) -> Result<(Writer<T>, Reader<T>), std::io::Error>
 where
     T: Default,
 {
@@ -524,17 +504,17 @@ where
     let cbsize = pagesize;
 
     if std::mem::size_of::<ControlBlock>() > pagesize {
-        return Err(CError {
-            hint: "ControlBlock does not fit in a single page",
-            err: std::io::ErrorKind::Other.into(),
-        });
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "ControlBlock does not fit in a single page",
+        ));
     }
 
     let (initmap, buffer) = unsafe {
         let f = memoryfile()?;
         let bufsize = capacity * std::mem::size_of::<T>();
         if ftruncate(f.as_raw_fd(), (cbsize + bufsize) as i64) != 0 {
-            return Err(CError::new("ftruncate"));
+            return Err(errno_with_hint("ftruncate"));
         }
         let map = doublemap(f.as_raw_fd(), cbsize, bufsize)?;
 
@@ -558,7 +538,7 @@ where
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn cueue<T>(requested_capacity: usize) -> Result<(Writer<T>, Reader<T>), CError>
+pub fn cueue<T>(requested_capacity: usize) -> Result<(Writer<T>, Reader<T>), std::io::Error>
 where
     T: Default,
 {
