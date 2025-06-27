@@ -245,10 +245,7 @@ fn next_power_two(n: usize) -> Result<usize, std::io::Error> {
     if result >= n {
         Ok(result)
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "next_power_two",
-        ))
+        Err(std::io::Error::other("next_power_two"))
     }
 }
 
@@ -504,8 +501,7 @@ where
     let cbsize = pagesize;
 
     if std::mem::size_of::<ControlBlock>() > pagesize {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(std::io::Error::other(
             "ControlBlock does not fit in a single page",
         ));
     }
