@@ -2,7 +2,7 @@
 
 A high performance, single-producer, single-consumer, bounded circular buffer
 of contiguous elements, that supports lock-free atomic batch operations,
-suitable for inter-thread communication.
+suitable for both inter-thread and inter-process communication.
 
 ## Example
 
@@ -78,8 +78,7 @@ during any point of usage, and simplifies the indexing logic of the code. Synchr
 between writer and reader is done by atomic operations, there are no mutexes or lock ASM instruction prefixes
 (on the tested platforms: x86 and M1).
 
-(Not shown here, but this structure also allows inter-process communication using shared memory,
-and data recovery from coredumps)
+This structure also allows inter-process communication using shared memory, and data recovery from coredumps.
 
 ## Limitations
 

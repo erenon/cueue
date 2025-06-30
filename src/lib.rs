@@ -165,6 +165,7 @@ fn platform_flags() -> i32 {
 }
 
 /// Map a `size` chunk of `fd` at `offset` twice, next to each other in virtual memory
+/// Also map [0,offset) for the control block.
 /// The size of the file pointed by `fd` must be >= offset + size.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> std::io::Result<MemoryMap> {
@@ -184,6 +185,18 @@ unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> std::io::Result<Me
     );
     if map.failed() {
         return Err(errno_with_hint("mmap 1"));
+    }
+
+    let cb = mmap(
+        map.ptr() as *mut c_void,
+        offset,
+        rw,
+        MAP_SHARED | MAP_FIXED,
+        fd,
+        0,
+    );
+    if cb == MAP_FAILED {
+        return Err(errno_with_hint("mmap cb"));
     }
 
     // Map f twice, put maps next to each other with MAP_FIXED
@@ -261,10 +274,21 @@ struct CacheLineAlignedAU64(std::sync::atomic::AtomicU64);
 /// Cueue is full if W == R+capacity
 /// Invariant: W >= R
 /// Invariant: R + capacity >= W
-#[derive(Default)]
+#[repr(C)]
 struct ControlBlock {
     write_position: CacheLineAlignedAU64,
     read_position: CacheLineAlignedAU64,
+    capacity: u64,
+}
+
+impl ControlBlock {
+    pub fn new(capacity: usize) -> Self {
+        ControlBlock {
+            write_position: CacheLineAlignedAU64(0.into()),
+            read_position: CacheLineAlignedAU64(0.into()),
+            capacity: capacity as u64,
+        }
+    }
 }
 
 /// Writer of a Cueue.
@@ -284,12 +308,13 @@ impl<T> Writer<T>
 where
     T: Default,
 {
-    fn new(mem: std::sync::Arc<MemoryMapInitialized<T>>, buffer: *mut T, capacity: usize) -> Self {
+    fn new(mem: std::sync::Arc<MemoryMapInitialized<T>>, buffer: *mut T) -> Self {
         let cb = mem.controlblock();
+        let capacity = unsafe { (*cb).capacity };
         Self {
             mem,
             cb,
-            mask: capacity as u64 - 1,
+            mask: capacity - 1,
             buffer,
             write_begin: std::ptr::null_mut(),
             write_capacity: 0,
@@ -394,16 +419,13 @@ impl<T> Reader<T>
 where
     T: Default,
 {
-    fn new(
-        mem: std::sync::Arc<MemoryMapInitialized<T>>,
-        buffer: *const T,
-        capacity: usize,
-    ) -> Self {
+    fn new(mem: std::sync::Arc<MemoryMapInitialized<T>>, buffer: *const T) -> Self {
         let cb = mem.controlblock();
+        let capacity = unsafe { (*cb).capacity };
         Self {
             mem,
             cb,
-            mask: capacity as u64 - 1,
+            mask: capacity - 1,
             buffer,
             read_begin: std::ptr::null(),
             read_size: 0,
@@ -496,9 +518,29 @@ pub fn cueue<T>(requested_capacity: usize) -> std::io::Result<(Writer<T>, Reader
 where
     T: Default,
 {
+    let f = unsafe { memoryfile()? };
+    cueue_in_fd(f.as_raw_fd(), Some(requested_capacity))
+}
+
+// TODO bad: already_initialized vs. requested_capacity
+
+/// Like `cueue`, but takes a file descriptor `f`, to put the queue into.
+///
+/// If `requested_capacity` is Some, it'll initialize the queue for the
+/// given size, otherwise it assumes the queue is already initialized.
+///
+/// This can be used with a file that is setup for inter-process communication,
+/// see the `ipc_write` and `ipc_read` examples. Each handle (Writer and Reader)
+/// must be used in a single process only: the queue is unidirectional.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn cueue_in_fd<T>(
+    f: RawFd,
+    requested_capacity: Option<usize>,
+) -> std::io::Result<(Writer<T>, Reader<T>)>
+where
+    T: Default,
+{
     let pagesize = unsafe { sysconf(_SC_PAGESIZE) as usize };
-    let capacity = next_power_two(usize::max(requested_capacity, pagesize))?;
-    let cbsize = pagesize;
 
     if std::mem::size_of::<ControlBlock>() > pagesize {
         return Err(std::io::Error::other(
@@ -506,30 +548,57 @@ where
         ));
     }
 
-    let (initmap, buffer) = unsafe {
-        let f = memoryfile()?;
-        let bufsize = capacity * std::mem::size_of::<T>();
-        if ftruncate(f.as_raw_fd(), (cbsize + bufsize) as i64) != 0 {
-            return Err(errno_with_hint("ftruncate"));
+    let initmap;
+    let buf;
+
+    if let Some(requested_capacity) = requested_capacity {
+        // create the queue
+        let cap = next_power_two(usize::max(requested_capacity, pagesize))?;
+        let bufsize = cap * std::mem::size_of::<T>();
+
+        unsafe {
+            if ftruncate(f.as_raw_fd(), (pagesize + bufsize) as i64) != 0 {
+                return Err(errno_with_hint("ftruncate"));
+            }
+            let map = doublemap(f.as_raw_fd(), pagesize, bufsize)?;
+            buf = map.ptr().add(pagesize).cast::<T>();
+
+            // initialize control block
+            let cbp = map.ptr() as *mut ControlBlock;
+            cbp.write(ControlBlock::new(cap));
+
+            // default initialize elems.
+            // this is required to make sure writer always sees initialized elements
+            initmap = MemoryMapInitialized::new(map, buf, cap)
         }
-        let map = doublemap(f.as_raw_fd(), cbsize, bufsize)?;
+    } else {
+        // the queue is already created, attach to it
+        let cap = unsafe {
+            let mut cb = std::mem::MaybeUninit::<ControlBlock>::uninit();
+            let cbsize = std::mem::size_of::<ControlBlock>();
+            let rs = libc::read(f, cb.as_mut_ptr() as *mut c_void, cbsize);
+            if rs < cbsize as isize {
+                return Err(std::io::Error::other(
+                    "Failed to read control block from file",
+                ));
+            }
 
-        // initialize control block
-        let cbp = map.ptr() as *mut ControlBlock;
-        cbp.write(ControlBlock::default());
+            cb.assume_init().capacity as usize
+        };
+        let bufsize = cap * std::mem::size_of::<T>();
 
-        // default initialize elems.
-        // this is required to make sure writer always sees initialized elements
-        let buffer = map.ptr().add(cbsize).cast::<T>();
-        let initmap = MemoryMapInitialized::new(map, buffer, capacity);
+        unsafe {
+            let map = doublemap(f.as_raw_fd(), pagesize, bufsize)?;
+            buf = map.ptr().add(pagesize).cast::<T>();
+            initmap = MemoryMapInitialized { map, buf, cap }
+        }
+    }
 
-        (initmap, buffer)
-    };
     let shared_map = std::sync::Arc::new(initmap);
 
     Ok((
-        Writer::new(shared_map.clone(), buffer, capacity),
-        Reader::new(shared_map, buffer, capacity),
+        Writer::new(shared_map.clone(), buf),
+        Reader::new(shared_map, buf),
     ))
 }
 
