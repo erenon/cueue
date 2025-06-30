@@ -1,4 +1,4 @@
-// An example of constructing, writing and reading a cueue
+//! An example of constructing, writing and reading a cueue
 
 fn main() {
     // Create a cueue with capacity at least 1M.
