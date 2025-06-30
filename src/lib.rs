@@ -40,7 +40,7 @@ fn errno_with_hint(hint: &str) -> std::io::Error {
 
 /// Create a file descriptor that points to a location in memory.
 #[cfg(target_os = "linux")]
-unsafe fn memoryfile() -> Result<OwnedFd, std::io::Error> {
+unsafe fn memoryfile() -> std::io::Result<OwnedFd> {
     let name = CString::new("cueue").unwrap();
     let memfd = libc::memfd_create(name.as_ptr(), 0);
     if memfd < 0 {
@@ -50,7 +50,7 @@ unsafe fn memoryfile() -> Result<OwnedFd, std::io::Error> {
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn memoryfile() -> Result<OwnedFd, std::io::Error> {
+unsafe fn memoryfile() -> std::io::Result<OwnedFd> {
     let path = CString::new("/tmp/cueue_XXXXXX").unwrap();
     let path_cstr = path.into_raw();
     let tmpfd = libc::mkstemp(path_cstr);
@@ -167,7 +167,7 @@ fn platform_flags() -> i32 {
 /// Map a `size` chunk of `fd` at `offset` twice, next to each other in virtual memory
 /// The size of the file pointed by `fd` must be >= offset + size.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> Result<MemoryMap, std::io::Error> {
+unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> std::io::Result<MemoryMap> {
     // Create a map, offset + twice the size, to get a suitable virtual address which will work with MAP_FIXED
     let rw = PROT_READ | PROT_WRITE;
     let mapsize = offset + size * 2;
@@ -230,7 +230,7 @@ unsafe fn doublemap() {
 
 /// Returns smallest power of 2 not smaller than `n`,
 /// or an error if the expected result cannot be represented by the return type.
-fn next_power_two(n: usize) -> Result<usize, std::io::Error> {
+fn next_power_two(n: usize) -> std::io::Result<usize> {
     if n == 0 {
         return Ok(1);
     }
@@ -492,7 +492,7 @@ unsafe impl<T> Send for Reader<T> {}
 /// On success, returns a `(Writer, Reader)` pair, that share the ownership
 /// of the underlying circular array.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub fn cueue<T>(requested_capacity: usize) -> Result<(Writer<T>, Reader<T>), std::io::Error>
+pub fn cueue<T>(requested_capacity: usize) -> std::io::Result<(Writer<T>, Reader<T>)>
 where
     T: Default,
 {
@@ -534,7 +534,7 @@ where
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn cueue<T>(requested_capacity: usize) -> Result<(Writer<T>, Reader<T>), std::io::Error>
+pub fn cueue<T>(requested_capacity: usize) -> std::io::Result<(Writer<T>, Reader<T>)>
 where
     T: Default,
 {
