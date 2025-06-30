@@ -12,3 +12,7 @@ readme = "README.md"
 
 [dependencies]
 libc = "0.2.132"
+
+[[bench]]
+name = "ipc_bench"
+harness = false
