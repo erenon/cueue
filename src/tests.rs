@@ -177,3 +177,21 @@ fn test_cueue_threaded_w_r() {
     wt.join().unwrap();
     rt.join().unwrap();
 }
+
+#[test]
+fn test_non_default() {
+    struct NotDefault {
+        x: i32,
+    }
+
+    let (mut w, _) = cueue_with(|| NotDefault { x: 27 }, 16).unwrap();
+
+    let cap = w.capacity();
+    assert!(cap >= 16);
+    let buf = w.write_chunk();
+    assert_eq!(buf.len(), cap);
+
+    for elem in buf {
+        assert_eq!(elem.x, 27);
+    }
+}

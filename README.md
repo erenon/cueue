@@ -26,7 +26,7 @@ The Writer can request space to write (`write_chunk`),
 limited by the queue capacity minus the already committed but unread space.
 Requested space can written to, then committed (`end_write`).
 A special feature of this container is that stored elements are always initialized,
-(in the beginning, defaulted, therefore `T` must implement `Default`), and only
+(either by `T::Default` or a custom init function), and only
 dropped when the queue is dropped. Therefore, the writer can reuse previously
 written, but then consumed elements (useful if the elements own e.g: heap allocated memory),
 and in those cases, contention on the producers heap lock is avoided (that is otherwise present,

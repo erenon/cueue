@@ -124,14 +124,14 @@ struct MemoryMapInitialized<T> {
     cap: usize,
 }
 
-impl<T> MemoryMapInitialized<T>
-where
-    T: Default,
-{
-    fn new(map: MemoryMap, buf: *mut T, cap: usize) -> Self {
+impl<T> MemoryMapInitialized<T> {
+    fn new<F>(mut init: F, map: MemoryMap, buf: *mut T, cap: usize) -> Self
+    where
+        F: FnMut() -> T,
+    {
         for i in 0..cap {
             unsafe {
-                buf.add(i).write(T::default());
+                buf.add(i).write(init());
             }
         }
         Self { map, buf, cap }
@@ -283,10 +283,7 @@ pub struct Writer<T> {
     write_capacity: usize,
 }
 
-impl<T> Writer<T>
-where
-    T: Default,
-{
+impl<T> Writer<T> {
     fn new(mem: std::sync::Arc<MemoryMapInitialized<T>>, buffer: *mut T) -> Self {
         let cb = mem.controlblock();
         let capacity = unsafe { (*cb).capacity };
@@ -394,10 +391,7 @@ pub struct Reader<T> {
     read_size: u64,
 }
 
-impl<T> Reader<T>
-where
-    T: Default,
-{
+impl<T> Reader<T> {
     fn new(mem: std::sync::Arc<MemoryMapInitialized<T>>, buffer: *const T) -> Self {
         let cb = mem.controlblock();
         let capacity = unsafe { (*cb).capacity };
@@ -492,6 +486,8 @@ unsafe impl<T> Send for Reader<T> {}
 ///
 /// On success, returns a `(Writer, Reader)` pair, that share the ownership
 /// of the underlying circular array.
+///
+/// Elements in the cueue are default initialized.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn cueue<T>(requested_capacity: usize) -> std::io::Result<(Writer<T>, Reader<T>)>
 where
@@ -501,7 +497,18 @@ where
     cueue_in_fd(f.as_raw_fd(), Some(requested_capacity))
 }
 
-// TODO bad: already_initialized vs. requested_capacity
+/// Same as [cueue], but elements are initialized by `init`, instead of Default.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn cueue_with<T, F>(
+    init: F,
+    requested_capacity: usize,
+) -> std::io::Result<(Writer<T>, Reader<T>)>
+where
+    F: FnMut() -> T,
+{
+    let f = unsafe { memoryfile()? };
+    cueue_in_fd_with(init, f.as_raw_fd(), Some(requested_capacity))
+}
 
 /// Like `cueue`, but takes a file descriptor `f`, to put the queue into.
 ///
@@ -519,6 +526,20 @@ pub fn cueue_in_fd<T>(
 where
     T: Default,
 {
+    cueue_in_fd_with(T::default, f, requested_capacity)
+}
+
+/// Same as [cueue_in_fd], but elements are initialized by `init`, instead of Default.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn cueue_in_fd_with<T, F>(
+    init: F,
+    f: RawFd,
+    requested_capacity: Option<usize>,
+) -> std::io::Result<(Writer<T>, Reader<T>)>
+where
+    F: FnMut() -> T,
+{
+    // TODO bad: already_initialized vs. requested_capacity
     let pagesize = unsafe { sysconf(_SC_PAGESIZE) as usize };
 
     if std::mem::size_of::<ControlBlock>() > pagesize {
@@ -550,7 +571,7 @@ where
 
             // default initialize elems.
             // this is required to make sure writer always sees initialized elements
-            initmap = MemoryMapInitialized::new(map, buf, cap)
+            initmap = MemoryMapInitialized::new(init, map, buf, cap)
         }
     } else {
         // the queue is already created, attach to it
