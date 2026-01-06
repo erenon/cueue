@@ -376,7 +376,7 @@ impl<T> Writer<T> {
     }
 }
 
-unsafe impl<T> Send for Writer<T> {}
+unsafe impl<T: Send> Send for Writer<T> {}
 
 /// Reader of a Cueue.
 ///
@@ -474,7 +474,7 @@ impl<T> Reader<T> {
     }
 }
 
-unsafe impl<T> Send for Reader<T> {}
+unsafe impl<T: Send> Send for Reader<T> {}
 
 /// Create a single-producer, single-consumer `Cueue`.
 ///
