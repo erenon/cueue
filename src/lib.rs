@@ -199,6 +199,11 @@ unsafe fn doublemap(fd: RawFd, offset: usize, size: usize) -> std::io::Result<Me
         return Err(errno_with_hint("mmap cb"));
     }
 
+    // if sizeof(T) == 0, the buffer capacity is also 0, but mmap doesn't like that
+    if size == 0 {
+        return Ok(map);
+    }
+
     // Map f twice, put maps next to each other with MAP_FIXED
     // MAP_SHARED is required to have the changes propagated between maps
     let first_addr = map.ptr().add(offset) as *mut c_void;

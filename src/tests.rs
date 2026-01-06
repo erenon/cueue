@@ -195,3 +195,20 @@ fn test_non_default() {
         assert_eq!(elem.x, 27);
     }
 }
+
+#[test]
+fn test_empty() {
+    struct Empty {}
+    let (mut w, mut r) = cueue_with(|| Empty {}, 16).unwrap();
+
+    let cap = w.capacity();
+    assert!(cap >= 16);
+
+    let buf = w.write_chunk();
+    assert!(buf.len() >= 16);
+    w.commit(3);
+
+    let rbuf = r.read_chunk();
+    assert_eq!(rbuf.len(), 3);
+    r.commit();
+}
