@@ -241,27 +241,6 @@ unsafe fn doublemap() {
     todo!("Only Linux and macOS are supported so far");
 }
 
-/// Returns smallest power of 2 not smaller than `n`,
-/// or an error if the expected result cannot be represented by the return type.
-fn next_power_two(n: usize) -> std::io::Result<usize> {
-    if n == 0 {
-        return Ok(1);
-    }
-
-    let mut m = n - 1;
-    let mut result = 1;
-    while m != 0 {
-        m >>= 1;
-        result <<= 1;
-    }
-
-    if result >= n {
-        Ok(result)
-    } else {
-        Err(std::io::Error::other("next_power_two"))
-    }
-}
-
 /// Force an AtomicU64 to a separate cache-line to avoid false-sharing.
 /// This wrapper is needed as I was unable to specify alignment for individual fields.
 #[repr(align(128))]
@@ -553,7 +532,9 @@ where
 
     if let Some(requested_capacity) = requested_capacity {
         // create the queue
-        let cap = next_power_two(usize::max(requested_capacity, pagesize))?;
+        let cap = usize::max(requested_capacity, pagesize)
+            .checked_next_power_of_two()
+            .ok_or(std::io::Error::other("next_power_two"))?;
         let bufsize = cap * std::mem::size_of::<T>();
 
         unsafe {
